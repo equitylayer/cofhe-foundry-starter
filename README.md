@@ -42,45 +42,9 @@ forge test -vvv
 
 ## How FHE Testing Works
 
-Tests use `CoFheTest` from `@cofhe/mock-contracts`, which provides:
+Tests use `CoFheTest` from `@cofhe/mock-contracts`, which provides mock contract deployment, encrypted input creation, plaintext assertions, and permission testing -- all in Solidity with no JS SDK needed.
 
-- **Mock contract deployment** at fixed addresses (MockTaskManager, MockACL, etc.)
-- **Encrypted input creation** via `createInEuint32(value, sender)` — no JS SDK needed
-- **Plaintext assertions** via `assertHashValue(encryptedValue, expectedPlaintext)`
-- **Permission testing** via `createPermissionSelf()` and `signPermissionSelf()`
-
-The mock system stores plaintext behind ciphertext hashes, enabling deterministic testing entirely in Solidity.
-
-### Example Test
-
-```solidity
-function test_ShouldIncrementTheCounter() public {
-    // Initial count should be 0
-    assertHashValue(counter.count(), uint32(0));
-
-    // Increment as bob
-    vm.prank(bob);
-    counter.increment();
-
-    // Count should be 1
-    assertHashValue(counter.count(), uint32(1));
-}
-```
-
-## FHE Operations
-
-The `Counter.sol` contract demonstrates these FHE operations:
-
-| Operation | Description |
-|-----------|-------------|
-| `FHE.asEuint32(value)` | Create encrypted uint32 from plaintext |
-| `FHE.add(a, b)` | Encrypted addition |
-| `FHE.sub(a, b)` | Encrypted subtraction |
-| `FHE.gte(a, b)` | Encrypted greater-than-or-equal |
-| `FHE.allowThis(value)` | Grant this contract access to value |
-| `FHE.allowSender(value)` | Grant msg.sender access to value |
-| `FHE.decrypt(value)` | Request on-chain decryption (async) |
-| `FHE.getDecryptResultSafe(value)` | Retrieve decryption result |
+For the full testing guide covering all helper functions, FHE operations, ACL, permits, and patterns, see **[TESTING.md](TESTING.md)**.
 
 ## Deployment
 
