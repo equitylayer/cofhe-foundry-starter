@@ -3,11 +3,8 @@ pragma solidity ^0.8.25;
 
 import {Test} from "forge-std/Test.sol";
 import {CoFheTest} from "@cofhe/mock-contracts/foundry/CoFheTest.sol";
-import {FHE, euint32, InEuint32} from "@fhenixprotocol/cofhe-contracts/FHE.sol";
-import {
-    MockPermissioned,
-    Permission
-} from "@cofhe/mock-contracts/Permissioned.sol";
+import {euint32, InEuint32} from "@fhenixprotocol/cofhe-contracts/FHE.sol";
+import {Permission} from "@cofhe/mock-contracts/Permissioned.sol";
 import {Counter} from "../src/Counter.sol";
 
 contract CounterTest is Test, CoFheTest {
@@ -15,127 +12,98 @@ contract CounterTest is Test, CoFheTest {
     address public bob;
     address public alice;
     uint256 public bobKey;
+    uint256 public aliceKey;
 
     function setUp() public {
-        // CoFheTest constructor already called etchFhenixMocks()
-        // which deploys MockTaskManager, MockACL, MockZkVerifier, etc. at their fixed addresses
-
-        // Create labeled accounts with known private keys
         (bob, bobKey) = makeAddrAndKey("bob");
-        alice = makeAddr("alice");
+        (alice, aliceKey) = makeAddrAndKey("alice");
 
-        // Deploy Counter as bob
         vm.prank(bob);
         counter = new Counter();
     }
 
-    // =========================================
-    // Functionality Tests
-    // =========================================
+    // --- Functionality ---
 
     function test_ShouldIncrementTheCounter() public {
-        // Initial count should be 0
         assertHashValue(counter.count(), uint32(0));
 
-        // Increment as bob
         vm.prank(bob);
         counter.increment();
 
-        // Count should be 1
         assertHashValue(counter.count(), uint32(1));
     }
 
     function test_ShouldDecrementTheCounter() public {
-        // First increment to 1 so we can decrement back to 0
         vm.prank(bob);
         counter.increment();
         assertHashValue(counter.count(), uint32(1));
 
-        // Decrement back to 0
         vm.prank(bob);
         counter.decrement();
         assertHashValue(counter.count(), uint32(0));
     }
 
     function test_ShouldEncryptInputAndResetCounter() public {
-        // Create encrypted input with value 2000
         InEuint32 memory encrypted = createInEuint32(2000, bob);
 
-        // Reset as bob
         vm.prank(bob);
         counter.reset(encrypted);
 
-        // Verify count is 2000
         assertHashValue(counter.count(), uint32(2000));
     }
 
     function test_ShouldHandleMultipleOperationsInSequence() public {
-        // Reset to 10
         InEuint32 memory encrypted = createInEuint32(10, bob);
         vm.prank(bob);
         counter.reset(encrypted);
 
-        // Increment 3 times: 10 -> 11 -> 12 -> 13
+        // 10 -> 11 -> 12 -> 13 -> 12
         vm.startPrank(bob);
         counter.increment();
         counter.increment();
         counter.increment();
-
-        // Decrement once: 13 -> 12
         counter.decrement();
         vm.stopPrank();
 
         assertHashValue(counter.count(), uint32(12));
     }
 
-    // =========================================
-    // On-chain Decryption Tests
-    // =========================================
+    // --- On-chain Decryption ---
 
     function test_ShouldRevertBeforeDecryptionReturned() public {
-        // Reset to 42
         InEuint32 memory encrypted = createInEuint32(42, bob);
         vm.prank(bob);
         counter.reset(encrypted);
 
-        // Request on-chain decryption
         vm.prank(bob);
         counter.decryptCounter();
 
-        // Should revert because the mock async delay has not passed
+        // Mock async delay has not passed yet
         vm.expectRevert("Value is not ready");
         counter.getDecryptedValue();
     }
 
     function test_ShouldReturnDecryptedValueAfterTimePassed() public {
-        // Reset to 42
         InEuint32 memory encrypted = createInEuint32(42, bob);
         vm.prank(bob);
         counter.reset(encrypted);
 
-        // Request on-chain decryption
         vm.prank(bob);
         counter.decryptCounter();
 
-        // Advance time to allow mock coprocessor to process the decryption callback
-        // MockTaskManager uses: asyncOffset = (block.timestamp % 10) + 1
+        // MockTaskManager async offset: (block.timestamp % 10) + 1
         vm.warp(block.timestamp + 100);
 
-        // Now the decrypted value should be available
         uint256 decryptedValue = counter.getDecryptedValue();
         assertEq(decryptedValue, 42);
     }
 
-    // =========================================
-    // Mock Storage Tests (equivalent of Mock Logging)
-    // =========================================
+    // --- Mock Storage ---
 
     function test_ShouldCheckPlaintextDirectly() public {
-        // Increment
         vm.prank(bob);
         counter.increment();
 
-        // Read plaintext directly from mock storage
         uint256 countHash = euint32.unwrap(counter.count());
         uint256 plaintext = mockStorage(countHash);
         assertEq(plaintext, 1);
@@ -147,68 +115,113 @@ contract CounterTest is Test, CoFheTest {
         counter.increment();
         vm.stopPrank();
 
-        // assertHashValue checks both that the hash exists in mock storage
-        // and that its plaintext equals the expected value
         assertHashValue(counter.count(), uint32(2));
     }
 
-    // =========================================
-    // Permission Tests
-    // =========================================
+    // --- ACL & Permit Unsealing ---
 
-    function test_SelfPermitShouldBeValid() public {
-        // Create a self-permission for bob
-        Permission memory permission = createPermissionSelf(bob);
-        permission.sealingKey = createSealingKey(1);
+    function test_CallerCanUnsealAfterIncrement() public {
+        vm.prank(bob);
+        counter.increment();
 
-        // Sign the permission with bob's private key
-        permission = signPermissionSelf(permission, bobKey);
+        uint256 countHash = euint32.unwrap(counter.count());
 
-        // Verify the permission is valid on-chain
-        bool isValid = mockAcl.checkPermitValidity(permission);
-        assertTrue(isValid);
-    }
+        Permission memory bobPermit = createPermissionSelf(bob);
+        bobPermit.sealingKey = createSealingKey(1);
+        bobPermit = signPermissionSelf(bobPermit, bobKey);
 
-    function test_ExpiredPermitShouldRevert() public {
-        // Warp to a realistic timestamp (Foundry starts at timestamp=1)
-        vm.warp(1700000000);
-
-        // Create a self-permission with an expired timestamp
-        Permission memory permission = createBasePermission();
-        permission.issuer = bob;
-        permission.expiration = uint64(block.timestamp) - 3600; // 1 hour ago
-        permission.sealingKey = createSealingKey(1);
-
-        // Sign the permission
-        permission = signPermissionSelf(permission, bobKey);
-
-        // Should revert with PermissionInvalid_Expired
-        vm.expectRevert(MockPermissioned.PermissionInvalid_Expired.selector);
-        mockAcl.checkPermitValidity(permission);
-    }
-
-    function test_InvalidSignatureShouldRevert() public {
-        // Create a self-permission for bob
-        Permission memory permission = createPermissionSelf(bob);
-        permission.sealingKey = createSealingKey(1);
-
-        // Sign with bob's key
-        permission = signPermissionSelf(permission, bobKey);
-
-        // Tamper with the signature
-        permission
-            .issuerSignature = hex"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-
-        // Should revert with PermissionInvalid_IssuerSignature
-        vm.expectRevert(
-            MockPermissioned.PermissionInvalid_IssuerSignature.selector
+        (bool allowed, , uint256 decrypted) = queryDecrypt(
+            countHash,
+            block.chainid,
+            bobPermit
         );
-        mockAcl.checkPermitValidity(permission);
+        assertTrue(allowed, "Bob should be allowed to unseal");
+        assertEq(decrypted, 1, "Decrypted value should be 1");
     }
 
-    // =========================================
-    // Fuzz Tests (Foundry-native advantage)
-    // =========================================
+    function test_NonCallerCannotUnsealAfterIncrement() public {
+        vm.prank(bob);
+        counter.increment();
+
+        uint256 countHash = euint32.unwrap(counter.count());
+
+        // Alice has no ACL permission on this count
+        Permission memory alicePermit = createPermissionSelf(alice);
+        alicePermit.sealingKey = createSealingKey(2);
+        alicePermit = signPermissionSelf(alicePermit, aliceKey);
+
+        (bool allowed, string memory error, ) = queryDecrypt(
+            countHash,
+            block.chainid,
+            alicePermit
+        );
+        assertFalse(
+            allowed,
+            "Alice should NOT be allowed to unseal bob's count"
+        );
+        assertEq(error, "NotAllowed");
+    }
+
+    function test_SealOutputPermissionFlow() public {
+        vm.prank(bob);
+        counter.increment();
+
+        uint256 countHash = euint32.unwrap(counter.count());
+
+        bytes32 sealingKey = createSealingKey(42);
+        Permission memory bobPermit = createPermissionSelf(bob);
+        bobPermit.sealingKey = sealingKey;
+        bobPermit = signPermissionSelf(bobPermit, bobKey);
+
+        (bool allowed, , bytes32 sealedValue) = querySealOutput(
+            countHash,
+            block.chainid,
+            bobPermit
+        );
+        assertTrue(allowed, "Bob should be allowed to seal");
+
+        uint256 unsealed = unseal(sealedValue, sealingKey);
+        assertEq(unsealed, 1, "Unsealed value should be 1");
+    }
+
+    function test_PermissionTransfersToNewCaller() public {
+        vm.prank(bob);
+        counter.increment();
+
+        // Alice increments -- she gets allowSender on the new count
+        vm.prank(alice);
+        counter.increment();
+
+        uint256 countHash = euint32.unwrap(counter.count());
+
+        // Alice can unseal the current count
+        Permission memory alicePermit = createPermissionSelf(alice);
+        alicePermit.sealingKey = createSealingKey(3);
+        alicePermit = signPermissionSelf(alicePermit, aliceKey);
+
+        (bool aliceAllowed, , uint256 aliceDecrypted) = queryDecrypt(
+            countHash,
+            block.chainid,
+            alicePermit
+        );
+        assertTrue(aliceAllowed, "Alice should unseal the current count");
+        assertEq(aliceDecrypted, 2);
+
+        // Bob cannot unseal the current count (alice was the last caller)
+        Permission memory bobPermit = createPermissionSelf(bob);
+        bobPermit.sealingKey = createSealingKey(4);
+        bobPermit = signPermissionSelf(bobPermit, bobKey);
+
+        (bool bobAllowed, string memory error, ) = queryDecrypt(
+            countHash,
+            block.chainid,
+            bobPermit
+        );
+        assertFalse(bobAllowed, "Bob should NOT unseal alice's count");
+        assertEq(error, "NotAllowed");
+    }
+
+    // --- Fuzz Tests ---
 
     function testFuzz_ResetCounter(uint32 value) public {
         InEuint32 memory encrypted = createInEuint32(value, bob);
