@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Foundry
+out/
+cache/
+broadcast/
+
+# Environment
+.env
+
+# Deployments
+deployments/
+
+# OS
+.DS_Store

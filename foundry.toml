@@ -1,0 +1,22 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["node_modules"]
+test = "test"
+script = "script"
+solc_version = "0.8.25"
+evm_version = "cancun"
+auto_detect_remappings = false
+code_size_limit = 100000
+gas_reports = ["Counter"]
+ffi = false
+
+[rpc_endpoints]
+eth-sepolia = "${SEPOLIA_RPC_URL}"
+arb-sepolia = "${ARBITRUM_SEPOLIA_RPC_URL}"
+base-sepolia = "${BASE_SEPOLIA_RPC_URL}"
+
+[etherscan]
+eth-sepolia = { key = "${ETHERSCAN_API_KEY}" }
+arb-sepolia = { key = "${ARBISCAN_API_KEY}" }
+base-sepolia = { key = "${BASESCAN_API_KEY}" }
