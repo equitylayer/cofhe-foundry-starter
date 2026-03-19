@@ -16,6 +16,6 @@ contract IncrementCounter is Script {
         counter.increment();
         vm.stopBroadcast();
 
-        console.log("Counter incremented. New count hash:", euint32.unwrap(counter.count()));
+        console.log("Counter incremented. New count hash:", uint256(euint32.unwrap(counter.count())));
     }
 }

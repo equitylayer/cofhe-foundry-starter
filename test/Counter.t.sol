@@ -68,32 +68,41 @@ contract CounterTest is Test, CoFheTest {
         assertHashValue(counter.count(), uint32(12));
     }
 
-    // --- On-chain Decryption ---
+    // --- On-chain Decryption (new flow: allowPublic → decryptForTx → publishDecryptResult) ---
 
-    function test_ShouldRevertBeforeDecryptionReturned() public {
+    function test_ShouldRevertBeforeDecryptionPublished() public {
         InEuint32 memory encrypted = createInEuint32(42, bob);
         vm.prank(bob);
         counter.reset(encrypted);
 
+        // Allow public decryption but don't publish result yet
         vm.prank(bob);
-        counter.decryptCounter();
+        counter.allowCounterPublicly();
 
-        // Mock async delay has not passed yet
+        // Result not yet published on-chain
         vm.expectRevert("Value is not ready");
         counter.getDecryptedValue();
     }
 
-    function test_ShouldReturnDecryptedValueAfterTimePassed() public {
+    function test_ShouldReturnDecryptedValueAfterPublish() public {
         InEuint32 memory encrypted = createInEuint32(42, bob);
         vm.prank(bob);
         counter.reset(encrypted);
 
+        // Step 1: Allow public decryption
         vm.prank(bob);
-        counter.decryptCounter();
+        counter.allowCounterPublicly();
 
-        // MockTaskManager async offset: (block.timestamp % 10) + 1
-        vm.warp(block.timestamp + 100);
+        // Step 2: Simulate off-chain decryption (client.decryptForTx)
+        uint256 ctHash = uint256(euint32.unwrap(counter.count()));
+        (bool allowed, , uint256 plaintext) = decryptForTxWithoutPermit(ctHash);
+        assertTrue(allowed, "Should be allowed to decrypt");
+        assertEq(plaintext, 42);
 
+        // Step 3: Publish verified result on-chain
+        counter.revealCounter(uint32(plaintext), "");
+
+        // Step 4: Read the result
         uint256 decryptedValue = counter.getDecryptedValue();
         assertEq(decryptedValue, 42);
     }
@@ -104,7 +113,7 @@ contract CounterTest is Test, CoFheTest {
         vm.prank(bob);
         counter.increment();
 
-        uint256 countHash = euint32.unwrap(counter.count());
+        uint256 countHash = uint256(euint32.unwrap(counter.count()));
         uint256 plaintext = mockStorage(countHash);
         assertEq(plaintext, 1);
     }
@@ -124,7 +133,7 @@ contract CounterTest is Test, CoFheTest {
         vm.prank(bob);
         counter.increment();
 
-        uint256 countHash = euint32.unwrap(counter.count());
+        uint256 countHash = uint256(euint32.unwrap(counter.count()));
 
         Permission memory bobPermit = createPermissionSelf(bob);
         bobPermit.sealingKey = createSealingKey(1);
@@ -143,7 +152,7 @@ contract CounterTest is Test, CoFheTest {
         vm.prank(bob);
         counter.increment();
 
-        uint256 countHash = euint32.unwrap(counter.count());
+        uint256 countHash = uint256(euint32.unwrap(counter.count()));
 
         // Alice has no ACL permission on this count
         Permission memory alicePermit = createPermissionSelf(alice);
@@ -166,7 +175,7 @@ contract CounterTest is Test, CoFheTest {
         vm.prank(bob);
         counter.increment();
 
-        uint256 countHash = euint32.unwrap(counter.count());
+        uint256 countHash = uint256(euint32.unwrap(counter.count()));
 
         bytes32 sealingKey = createSealingKey(42);
         Permission memory bobPermit = createPermissionSelf(bob);
@@ -192,7 +201,7 @@ contract CounterTest is Test, CoFheTest {
         vm.prank(alice);
         counter.increment();
 
-        uint256 countHash = euint32.unwrap(counter.count());
+        uint256 countHash = uint256(euint32.unwrap(counter.count()));
 
         // Alice can unseal the current count
         Permission memory alicePermit = createPermissionSelf(alice);

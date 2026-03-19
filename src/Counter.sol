@@ -41,8 +41,12 @@ contract Counter {
         FHE.allowSender(count);
     }
 
-    function decryptCounter() public {
-        FHE.decrypt(count);
+    function allowCounterPublicly() public {
+        FHE.allowPublic(count);
+    }
+
+    function revealCounter(uint32 plaintext, bytes memory signature) public {
+        FHE.publishDecryptResult(count, plaintext, signature);
     }
 
     function getDecryptedValue() external view returns(uint256) {
@@ -51,5 +55,5 @@ contract Counter {
             revert("Value is not ready");
 
         return value;
-    }    
+    }
 }
