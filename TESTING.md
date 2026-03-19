@@ -2,7 +2,7 @@
 
 ## Test Setup
 
-Every test contract must inherit from both `Test` (forge-std) and `CoFheTest` (mock infrastructure). `CoFheTest`'s constructor automatically deploys all mock contracts (MockTaskManager, MockACL, MockZkVerifier, MockQueryDecrypter) at their expected addresses.
+Every test contract must inherit from both `Test` (forge-std) and `CoFheTest` (mock infrastructure). `CoFheTest`'s constructor automatically deploys all mock contracts (MockTaskManager, MockACL, MockZkVerifier, MockZkVerifierSigner, MockThresholdNetwork) at their expected addresses.
 
 ```solidity
 import {Test} from "forge-std/Test.sol";
@@ -31,7 +31,7 @@ InEbool, InEuint8, InEuint16, InEuint32, InEuint64, InEuint128, InEuint256, InEa
 
 ## Encrypted Types
 
-All encrypted types (`ebool`, `euint8`, ..., `eaddress`) are `uint256` newtypes. The value they hold is a **hash** (pointer) into the mock storage -- not the plaintext.
+All encrypted types (`ebool`, `euint8`, ..., `eaddress`) are `bytes32` newtypes. The value they hold is a **hash** (pointer) into the mock storage -- not the plaintext.
 
 | Type | Plaintext equivalent |
 |------|---------------------|
@@ -46,19 +46,19 @@ All encrypted types (`ebool`, `euint8`, ..., `eaddress`) are `uint256` newtypes.
 
 ### unwrap / wrap
 
-Convert between the encrypted newtype and its raw `uint256` hash:
+Convert between the encrypted newtype and its raw `bytes32` hash:
 
 ```solidity
 euint32 encrypted = FHE.asEuint32(42);
 
-// Get the raw hash
-uint256 hash = euint32.unwrap(encrypted);
+// Get the raw hash (bytes32)
+bytes32 hash = euint32.unwrap(encrypted);
 
 // Reconstruct from hash
 euint32 restored = euint32.wrap(hash);
 ```
 
-Use `unwrap` when you need the raw hash to pass to `mockStorage()`, `queryDecrypt()`, or other low-level helpers.
+Use `unwrap` when you need the raw hash. Since `mockStorage()`, `queryDecrypt()`, and other helpers expect `uint256`, cast with `uint256(euint32.unwrap(value))`.
 
 ---
 
@@ -168,16 +168,24 @@ euint32 fee = FHE.select(isLargeAmount, highFee, lowFee);
 euint32 net = FHE.sub(amount, fee);
 ```
 
-### Decryption (Async)
+### Decryption (New Flow)
 
-Request on-chain decryption. In production this is asynchronous (requires coprocessor). In tests, the mock resolves after a simulated delay.
+Decryption uses a three-step flow: **permission** (on-chain) → **decrypt** (off-chain) → **publish/verify** (on-chain with proof).
 
 ```solidity
 // In your contract:
-function decryptBalance() public {
-    FHE.decrypt(balance);
+
+// Step 1: Grant public decryption permission
+function allowBalancePublicly() public {
+    FHE.allowPublic(balance);
 }
 
+// Step 3: Publish verified result on-chain (called after off-chain decryption)
+function revealBalance(uint32 plaintext, bytes memory signature) public {
+    FHE.publishDecryptResult(balance, plaintext, signature);
+}
+
+// Step 4: Read the published result
 function getBalance() external view returns (uint256) {
     (uint256 value, bool ready) = FHE.getDecryptResultSafe(balance);
     if (!ready) revert("Not ready");
@@ -185,19 +193,35 @@ function getBalance() external view returns (uint256) {
 }
 ```
 
-In tests, simulate the async delay with `vm.warp`:
+In production, Step 2 happens off-chain via the client SDK (`client.decryptForTx(ctHash).withoutPermit().execute()`), which returns the decrypted value and a Threshold Network signature.
+
+In tests, use `decryptForTxWithoutPermit()` from `CoFheTest` to simulate the off-chain step:
 
 ```solidity
-function test_Decrypt() public {
-    myContract.decryptBalance();
+function test_DecryptFlow() public {
+    myContract.allowBalancePublicly();
 
-    // Simulate async delay
-    vm.warp(block.timestamp + 100);
+    // Simulate off-chain decryption (client SDK)
+    uint256 ctHash = uint256(euint32.unwrap(myContract.balance()));
+    (bool allowed, , uint256 plaintext) = decryptForTxWithoutPermit(ctHash);
+    assertTrue(allowed);
 
+    // Publish result on-chain
+    myContract.revealBalance(uint32(plaintext), "");
+
+    // Read the result
     uint256 result = myContract.getBalance();
     assertEq(result, expectedValue);
 }
 ```
+
+#### publishDecryptResult vs verifyDecryptResult
+
+| Aspect | `publishDecryptResult` | `verifyDecryptResult` |
+|--------|------------------------|----------------------|
+| **Storage** | Stores result on-chain | No storage |
+| **Visibility** | Other contracts can read via `getDecryptResultSafe` | Private to current call |
+| **Use case** | Public reveals (auctions, votes, counters) | One-time verification (transfers, burns) |
 
 ---
 
@@ -347,7 +371,7 @@ euint32 result = helper.verifyEuint32(input);
 Reads the plaintext stored behind an encrypted hash. Useful for low-level verification without going through typed assertions.
 
 ```solidity
-uint256 ctHash = euint32.unwrap(counter.count());
+uint256 ctHash = uint256(euint32.unwrap(counter.count()));
 uint256 plaintext = mockStorage(ctHash);
 assertEq(plaintext, 42);
 ```
@@ -358,7 +382,7 @@ Checks whether a ciphertext hash has an entry in the mock storage.
 
 ```solidity
 euint32 a = FHE.asEuint32(100);
-assertTrue(inMockStorage(euint32.unwrap(a)));
+assertTrue(inMockStorage(uint256(euint32.unwrap(a))));
 ```
 
 ### Permission & Permit Helpers
@@ -460,6 +484,20 @@ uint256 plaintext = unseal(sealedValue, sealingKey);
 assertEq(plaintext, 1);
 ```
 
+### decryptForTxWithoutPermit / decryptForTxWithPermit -- Simulate Off-chain Decryption
+
+These simulate the off-chain `client.decryptForTx()` SDK call. They check ACL permissions and return the plaintext from mock storage.
+
+```solidity
+// Public decryption (after FHE.allowPublic was called)
+(bool allowed, string memory error, uint256 plaintext) = decryptForTxWithoutPermit(ctHash);
+
+// Restricted decryption (after FHE.allow was called for a specific address)
+(bool allowed, string memory error, uint256 plaintext) = decryptForTxWithPermit(ctHash, permit);
+```
+
+Use these in tests to get the plaintext value before calling `publishDecryptResult` or `verifyDecryptResult` on your contract.
+
 ### setLog(bool)
 
 Enable/disable logging of FHE operations for debugging:
@@ -509,19 +547,27 @@ function test_ResetWithEncryptedInput() public {
 }
 ```
 
-### 4. On-chain Decryption (Async)
+### 4. On-chain Decryption (New Flow)
 
 ```solidity
 function test_DecryptFlow() public {
+    // Step 1: Allow public decryption
     vm.prank(bob);
-    counter.decryptCounter();
+    counter.allowCounterPublicly();
 
-    // Before delay: not ready
+    // Before publish: not ready
     vm.expectRevert("Value is not ready");
     counter.getDecryptedValue();
 
-    // After delay: ready
-    vm.warp(block.timestamp + 100);
+    // Step 2: Simulate off-chain decryption
+    uint256 ctHash = uint256(euint32.unwrap(counter.count()));
+    (bool allowed, , uint256 plaintext) = decryptForTxWithoutPermit(ctHash);
+    assertTrue(allowed);
+
+    // Step 3: Publish result on-chain
+    counter.revealCounter(uint32(plaintext), "");
+
+    // Step 4: Read result
     uint256 value = counter.getDecryptedValue();
     assertEq(value, expectedValue);
 }
@@ -536,7 +582,7 @@ function test_CallerCanUnseal() public {
     vm.prank(bob);
     counter.increment();
 
-    uint256 ctHash = euint32.unwrap(counter.count());
+    uint256 ctHash = uint256(euint32.unwrap(counter.count()));
 
     Permission memory permit = createPermissionSelf(bob);
     permit.sealingKey = createSealingKey(1);
@@ -553,7 +599,7 @@ function test_NonCallerCannotUnseal() public {
     vm.prank(bob);
     counter.increment();
 
-    uint256 ctHash = euint32.unwrap(counter.count());
+    uint256 ctHash = uint256(euint32.unwrap(counter.count()));
 
     Permission memory alicePermit = createPermissionSelf(alice);
     alicePermit.sealingKey = createSealingKey(2);
@@ -574,7 +620,7 @@ function test_SealAndUnseal() public {
     vm.prank(bob);
     counter.increment();
 
-    uint256 ctHash = euint32.unwrap(counter.count());
+    uint256 ctHash = uint256(euint32.unwrap(counter.count()));
     bytes32 sealingKey = createSealingKey(42);
 
     Permission memory permit = createPermissionSelf(bob);
@@ -611,8 +657,8 @@ function test_InspectStorage() public {
     euint32 b = FHE.asEuint32(222);
     euint32 c = FHE.add(a, b);
 
-    assertTrue(inMockStorage(euint32.unwrap(c)));
-    assertEq(mockStorage(euint32.unwrap(c)), 333);
+    assertTrue(inMockStorage(uint256(euint32.unwrap(c))));
+    assertEq(mockStorage(uint256(euint32.unwrap(c))), 333);
 }
 ```
 
@@ -677,5 +723,5 @@ The mock contracts simulate FHE behavior deterministically for testing. Be aware
 | `FHE.not(value)` | Boolean NOT (`value == 1 ? 0 : 1`) | Bitwise NOT |
 | `FHE.rol(a, b)` | Simple shift left (no wrap) | True bit rotation |
 | `FHE.ror(a, b)` | Simple shift right (no wrap) | True bit rotation |
-| Decryption | Immediate (with simulated delay via block timestamp) | Async via coprocessor |
+| Decryption | `decryptResultSigner` defaults to `address(0)`, so any signature (including empty `""`) is accepted | Requires valid Threshold Network signature |
 | Trivially encrypted ACL | Skipped (always allowed) | Same behavior |
