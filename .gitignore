@@ -12,7 +12,6 @@ broadcast/
 # Deployments
 deployments/
 
-# Dev
 .anvil.log
 
 # OS

@@ -205,6 +205,7 @@ contract ForgeMockACL is MockPermissioned {
     }
 
     function isAllowedWithPermission(Permission memory permission, uint256 handle) public view returns (bool) {
+        if ((handle & 0x80) == 0x80) return true; // skip byte randomness like isTriviallyEncryptedFromHash()
         return isAllowed(handle, permission.issuer);
     }
 
